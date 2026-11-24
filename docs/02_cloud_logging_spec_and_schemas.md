@@ -2,22 +2,27 @@
 
 > **Document:** `02_cloud_logging_spec_and_schemas.md`  
 > **Status:** Approved Production Specification  
-> **Reference:** Google Cloud Logging LogEntry & HTTP Load Balancer Access Logs  
-> **Visibility:** Public & Client-Safe
+> **Reference:** Google Cloud Logging LogEntry & Global External Application Load Balancer (GLB) Access Logs  
+> **Monitored Resource:** `resource.type="http_load_balancer"`  
+> **Visibility:** Public & Client-Safe  
 
 ---
 
 ## 1. Overview of GLB Access Logs in Cloud Logging
 
-When logging is enabled on a Backend Service of a Google Cloud Global External Application Load Balancer (GLB), each request produces a structured `LogEntry` in Cloud Logging categorized under the resource type `http_load_balancer`.
+When logging is enabled on a Backend Service of a Google Cloud Global External Application Load Balancer (GLB), each client request processed by the Google Front End (GFE) edge produces a structured `LogEntry` in Cloud Logging categorized under the monitored resource type `http_load_balancer`.
 
 ### 1.1. Prerequisites on the Customer GLB
-For Cloud Logging to record the access logs with full metadata, the target **Backend Service** on the GLB must have logging enabled:
-* `logConfig.enable = true`
-* `logConfig.sampleRate = 1.0` (or the desired sampling ratio between 0.0 and 1.0)
-* Optional: `logConfig.optionalFields = ["custom_headers"]` if customer-configured response/request headers are monitored.
+For Cloud Logging to record access logs with full metadata:
+1. **Enable Backend Service Logging:**
+   * `logConfig.enable = true`
+   * `logConfig.sampleRate = 1.0` (or customer sampling ratio, e.g., 0.5 - 1.0)
+2. **Optional Custom Headers:**
+   * Customers can optionally log custom request/response headers via `logConfig.optionalFields = ["custom_headers"]`.
+3. **Cloud Armor Security Policies:**
+   * When Google Cloud Armor is attached to the backend service or security policy, security decision metadata is automatically attached under `jsonPayload.enforcedSecurityPolicy` and `jsonPayload.securityPolicyRequestData`.
 
-If logging is not enabled on the Backend Service, queries to `entries.list` will return `200 OK` with an empty entry list `[]`.
+If logging is disabled on the Backend Service, queries to `logging.getEntries()` return `200 OK` with an empty entry list `[]`.
 
 ---
 
@@ -27,15 +32,36 @@ Below is the authoritative JSON schema structure of an incoming Cloud Logging re
 
 ```json
 {
-  "insertId": "1b2c3d4e5f6g7h8i9j0k",
+  "insertId": "1oek5rg3l3fxj7",
+  "jsonPayload": {
+    "@type": "type.googleapis.com/google.cloud.loadbalancing.type.LoadBalancerLogEntry",
+    "statusDetails": "response_sent_by_backend",
+    "cacheStatus": "MISS",
+    "enforcedSecurityPolicy": {
+      "name": "cloud-armor-rate-limit",
+      "outcome": "ALLOW",
+      "priority": 1000
+    },
+    "securityPolicyRequestData": {
+      "clientRegion": "US"
+    },
+    "httpRequest": {
+      "headers": {
+        "accept": "text/html,application/xhtml+xml",
+        "accept-language": "en-US,en;q=0.9",
+        "sec-ch-ua": "\"Chromium\";v=\"132\""
+      }
+    }
+  },
   "httpRequest": {
     "requestMethod": "GET",
     "requestUrl": "https://example.com/pricing?ref=chatgpt",
-    "requestSize": "428",
+    "requestSize": "577",
     "status": 200,
     "responseSize": "14280",
-    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ...",
-    "remoteIp": "203.0.113.195",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ...",
+    "remoteIp": "203.0.113.195:48210",
+    "serverIp": "10.128.0.4",
     "referer": "https://chatgpt.com/",
     "latency": "0.045120s",
     "protocol": "HTTP/2"
@@ -44,10 +70,10 @@ Below is the authoritative JSON schema structure of an incoming Cloud Logging re
     "type": "http_load_balancer",
     "labels": {
       "project_id": "customer-production-project",
+      "forwarding_rule_name": "glb-forwarding-rule-https",
+      "target_proxy_name": "glb-target-https-proxy",
       "url_map_name": "glb-url-map",
       "backend_service_name": "backend-service-frontend",
-      "target_proxy_name": "glb-target-https-proxy",
-      "forwarding_rule_name": "glb-forwarding-rule-https",
       "zone": "global"
     }
   },
@@ -58,77 +84,117 @@ Below is the authoritative JSON schema structure of an incoming Cloud Logging re
 }
 ```
 
-### 2.1. Key Field Definitions
+---
 
-| Field Name | Type | Description |
+## 3. Detailed Field Specifications & Parsing Rules
+
+### 3.1. Standard `httpRequest` Object
+The `httpRequest` object adheres to the Google Cloud Logging standard protocol definition:
+
+| Field Name | Type | Description | Collector Handling |
+| :--- | :--- | :--- | :--- |
+| `requestMethod` | `string` | HTTP verb (e.g. `GET`, `POST`, `OPTIONS`). | Normalized to uppercase (`request.method`). Default: `"GET"`. |
+| `requestUrl` | `string` | Full requested URL (e.g. `https://example.com/api?q=1`) or path. | Parsed via `URL` constructor into `scheme`, `host`, `path`, and `query_params`. Default host fallback supported. |
+| `status` | `number\|string` | Final HTTP response code (e.g. `200`, `403`, `504`). | Coerced to positive integer (`response.status_code`). Default: `200`. |
+| `userAgent` | `string` | Client User-Agent string. | Mapped to `request.user_agent` & `selected_headers['user-agent']`. Primary vector for **AI Bot & Crawler detection**. |
+| `referer` | `string` | Client HTTP referer header. | Mapped to `request.referer` & `selected_headers['referer']`. Primary vector for **GEO & AI Referral detection**. |
+| `remoteIp` | `string` | Client IP address observed by GFE edge proxy. May contain port suffix (`198.51.100.25:48210` or `[2001:db8::1]:8080`). | Port suffix stripped; clean IPv4/IPv6 assigned to `network.ip_hash`. |
+| `latency` | `string\|number\|object` | Round-trip processing time. Formatted as seconds with `s` suffix (e.g., `"0.045120s"`), numeric float, or protobuf Duration. | Parsed deterministically into integer milliseconds (`response.duration_ms`). |
+| `responseSize` | `number\|string` | Payload size transmitted to client in bytes. | Coerced to integer (`response.bytes_sent`). Default: `0`. |
+
+### 3.2. Detailed Taxonomy of `jsonPayload.statusDetails`
+Google Cloud Load Balancer populates `jsonPayload.statusDetails` to explain the routing lifecycle and root cause:
+
+| `statusDetails` Value | Associated HTTP Status | Semantic Meaning |
 | :--- | :--- | :--- |
-| `insertId` | `string` | Unique log entry identifier assigned by Google Cloud. Used for **idempotent deduplication**. |
-| `timestamp` | `string` (RFC 3339) | The exact UTC time when the request was completed by the GLB. |
-| `httpRequest.requestMethod` | `string` | HTTP verb: `GET`, `POST`, `HEAD`, `PUT`, `DELETE`, `OPTIONS`. |
-| `httpRequest.requestUrl` | `string` | Full requested URL including scheme, host, path, and query parameters. |
-| `httpRequest.status` | `number` | Final HTTP response status code (e.g. `200`, `301`, `403`, `502`). |
-| `httpRequest.userAgent` | `string` | Client User-Agent string. Primary vector for **AI Bot & Crawler detection**. |
-| `httpRequest.referer` | `string` | Referer URL. Primary vector for **GEO & AI Referral detection** (ChatGPT, Perplexity, Claude). |
-| `httpRequest.remoteIp` | `string` | Client IP address observed by the edge proxy. |
-| `httpRequest.latency` | `string` | Round-trip processing time formatted as seconds with suffix (e.g., `"0.024500s"`). |
-| `httpRequest.responseSize` | `string\|number` | Payload size transmitted to the client in bytes. |
+| `response_sent_by_backend` | `200-599` | Normal proxy execution: response was generated and returned by origin backend application. |
+| `response_from_cache` | `200`, `304` | Request served directly from Google Cloud CDN edge cache (0 origin latency). |
+| `byte_range_caching` | `206` | Cloud CDN partial content byte-range caching. |
+| `denied_by_security_policy` | `403` | Request blocked at GFE edge by a Google Cloud Armor security policy. |
+| `backend_timeout` | `504` | Origin backend failed to respond within configured GLB backend service timeout. |
+| `failed_to_pick_backend` | `502` | No healthy backend instances or backend service group available to service request. |
+| `handled_by_identity_aware_proxy`| `401`, `302` | Handled or redirected by Google Cloud Identity-Aware Proxy (IAP). |
+| `internal_error` | `500` | Temporary Google Cloud Load Balancing edge infrastructure anomaly. |
+
+### 3.3. Cloud Armor Security Policies & Geographic Region
+When Cloud Armor evaluates a request, Google Cloud emits:
+* `jsonPayload.enforcedSecurityPolicy`: `{ name, outcome: "ALLOW" | "DENY", priority }`
+* `jsonPayload.securityPolicyRequestData.clientRegion`: Two-letter ISO country code (e.g. `"US"`, `"BR"`, `"DE"`), populated automatically by Google Cloud edge geo-IP resolution.
+* **Collector Geo Resolution:** If `clientRegion` is present in `securityPolicyRequestData`, the collector prioritizes it for `network.country`. If absent, it gracefully falls back to the zone label or `"XX"`.
+
+### 3.4. Custom Headers Handling
+If custom headers are captured via GLB logging:
+1. `jsonPayload.httpRequest.headers`: Key-value map of headers.
+2. `jsonPayload.customHeaders`: Array of string pairs (`["Header-Name: value"]`) or object map.
+3. Every custom header candidate is passed through `filterSafeHeaders()` to guarantee strict allowlist enforcement.
 
 ---
 
-## 3. Querying Cloud Logging: The Filter Expression
+## 4. Querying Cloud Logging: The Filter Expression
 
-The collector queries Cloud Logging via the official Node.js SDK (`@google-cloud/logging`) using `logging.getEntries()`.
+The collector executes structured queries against Google Cloud Logging via the official `@google-cloud/logging` SDK:
 
-### 3.1. Optimized Filter Syntax
-```sql
-resource.type="http_load_balancer" 
-AND timestamp >= "${startTimeISO}" 
-AND timestamp <= "${endTimeISO}"
+```javascript
+const filter = `resource.type="http_load_balancer" AND timestamp >= "${startTimeISO}" AND timestamp <= "${endTimeISO}"`;
+
+const [entries] = await logging.getEntries({
+  filter,
+  pageSize: 1000,
+  orderBy: 'timestamp asc'
+});
 ```
 
-### 3.2. Bot-Optimized Secondary Filter (Optional)
-To reduce Cloud Logging read volume and optimize bandwidth, the query can optionally filter out non-informative assets (like images, fonts, static bundles) or requests without User-Agent:
-```sql
-resource.type="http_load_balancer" 
-AND timestamp >= "${startTimeISO}" 
-AND httpRequest.userAgent:*
-```
+### 4.1. Sliding Lookback Window
+Cloud Scheduler executes the Cloud Run Function every 1 minute (`*/1 * * * *`). The collector computes:
+$$\text{startTime} = \text{Date.now}() - (\text{LOOKBACK\_SECONDS} \times 1000)$$
+$$\text{endTime} = \text{Date.now}()$$
+
+With a default `LOOKBACK_SECONDS=75`, a 15-second overlap prevents any log ingestion gaps from GFE log delivery jitter. Idempotent deduplication on `observation_id` (`insertId`) ensures duplicates are safely ignored by the Voight Trace Ingestion API.
 
 ---
 
-## 4. Normalization & Mapping to Voight Trace Event Contract
+## 5. Security & Privacy: Allowlisted Safe Headers
 
-The collector transforms each Cloud Logging `LogEntry` into the standard Voight Trace observation payload (`collector_type: "gcp_collector"`).
+The Voight Trace GCP Collector executes within the customer's BYOC environment. It guarantees zero leakage of private tokens or credentials:
 
 ```mermaid
-flowchart LR
-    A["Cloud Logging LogEntry"] --> B["GCP Collector Normalizer"]
-    B --> C["Voight Trace Ingestion Event"]
+flowchart TD
+    Raw["Raw GLB LogEntry & Headers"] --> Filter["filterSafeHeaders() Allowlist Engine"]
     
-    subgraph LogEntryMapping ["Field Mapping"]
-        A1["insertId"] --> C1["observation_id & deduplication key"]
-        A2["timestamp"] --> C2["occurred_at"]
-        A3["httpRequest.requestUrl"] --> C3["host, path, query_params"]
-        A4["httpRequest.userAgent"] --> C4["request.user_agent"]
-        A5["httpRequest.referer"] --> C5["request.referer"]
-        A6["httpRequest.latency ('0.045s')"] --> C6["response.duration_ms (45)"]
-        A7["httpRequest.status (200)"] --> C7["response.status_code (200)"]
+    subgraph DropZone ["FORBIDDEN HEADERS (Silently Dropped)"]
+        D1["authorization / proxy-authorization"]
+        D2["cookie / set-cookie"]
+        D3["x-api-key / api-key / x-auth-token"]
+        D4["passwords, secrets, session IDs"]
     end
+    
+    subgraph SafeZone ["SAFE ALLOWLISTED HEADERS"]
+        S1["user-agent, referer, host, origin"]
+        S2["accept, accept-language, accept-encoding, content-type"]
+        S3["sec-ch-ua, sec-ch-ua-mobile, sec-ch-ua-platform, sec-ch-ua-arch"]
+        S4["sec-fetch-dest, sec-fetch-mode, sec-fetch-site"]
+    end
+    
+    Filter -.->|DROP| DropZone
+    Filter -->|ALLOW| SafeZone
+    SafeZone --> Normalized["Voight Trace Observation Payload"]
 ```
 
-### 4.1. Concrete Transformed Event JSON
+---
+
+## 6. Concrete Normalized Output: Voight Trace Event Contract
 
 ```json
 {
-  "event_id": "e4f8d9c2-5b1a-4c3e-8f2a-1b0c9d8e7f6a",
+  "event_id": "8a7f9b2c-3d4e-4f5a-8b1c-9d0e1f2a3b4c",
   "event_type": "http.request",
   "schema_version": 1,
   "tenant_id": "018f2d5e-7a91-7f82-a312-d81b9542a301",
   "site_id": "018f2d5e-7a91-7f82-a312-d81b9542a301",
   "collector_id": "gcp_glb_us_central1",
   "collector_type": "gcp_collector",
-  "observation_id": "1b2c3d4e5f6g7h8i9j0k",
-  "correlation_id": "vgt_1b2c3d4e5f6g7h8i9j0k",
+  "observation_id": "1oek5rg3l3fxj7",
+  "correlation_id": "vgt_1oek5rg3l3fxj7",
   "occurred_at": "2026-11-24T09:25:00.123Z",
   "request": {
     "method": "GET",
@@ -139,15 +205,19 @@ flowchart LR
       "ref": "chatgpt"
     },
     "referer": "https://chatgpt.com/",
-    "user_agent": "Mozilla/5.0 ...",
+    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ...",
     "selected_headers": {
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ...",
+      "referer": "https://chatgpt.com/",
+      "host": "example.com",
       "accept": "text/html,application/xhtml+xml",
-      "accept-language": "en-US,en;q=0.9"
+      "accept-language": "en-US,en;q=0.9",
+      "sec-ch-ua": "\"Chromium\";v=\"132\""
     }
   },
   "network": {
     "ip_hash": "203.0.113.195",
-    "country": "XX",
+    "country": "US",
     "asn": 0
   },
   "response": {
@@ -157,7 +227,3 @@ flowchart LR
   }
 }
 ```
-
-### 4.2. Latency Conversion Formula
-Google Cloud Logging represents latency as a string with second units (e.g., `"0.045120s"`). The collector parses this deterministically into integer milliseconds:
-$$\text{duration\_ms} = \operatorname{Math.round}(\operatorname{parseFloat}(\text{latency}) \times 1000)$$

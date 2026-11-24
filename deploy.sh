@@ -8,6 +8,7 @@ set -euo pipefail
 
 # Default values
 REGION="${REGION:-us-central1}"
+PROJECT_ID="${PROJECT_ID:-}"
 API_KEY="${VOIGHT_TRACE_API_KEY:-}"
 SITE_ID="${VOIGHT_TRACE_SITE_ID:-}"
 LOOKBACK_SECONDS="${LOOKBACK_SECONDS:-75}"
@@ -16,6 +17,10 @@ INGEST_URL="${VOIGHT_TRACE_INGEST_URL:-https://api.voighttrace.com/api/v1/ingest
 # Parse command line flags
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --project-id=*|--project=*|-p=*)
+      PROJECT_ID="${1#*=}"
+      shift
+      ;;
     --api-key=*)
       API_KEY="${1#*=}"
       shift
@@ -34,6 +39,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown option: $1"
+      echo "Usage: ./deploy.sh --api-key=vt_live_... --site-id=018f2d5e... [--project-id=my-gcp-project] [--region=us-central1]"
       exit 1
       ;;
   esac
@@ -41,14 +47,17 @@ done
 
 if [[ -z "$API_KEY" || -z "$SITE_ID" ]]; then
   echo "Error: Missing required parameters."
-  echo "Usage: ./deploy.sh --api-key=vt_live_... --site-id=018f2d5e... [--region=us-central1]"
+  echo "Usage: ./deploy.sh --api-key=vt_live_... --site-id=018f2d5e... [--project-id=my-gcp-project] [--region=us-central1]"
   exit 1
 fi
 
-PROJECT_ID=$(gcloud config get-value project 2>/dev/null)
 if [[ -z "$PROJECT_ID" ]]; then
-  echo "Error: No active GCP project found in gcloud config."
-  echo "Run: gcloud config set project YOUR_PROJECT_ID"
+  PROJECT_ID=$(gcloud config get-value project 2>/dev/null || true)
+fi
+
+if [[ -z "$PROJECT_ID" ]]; then
+  echo "Error: No active GCP project found."
+  echo "Please provide --project-id=YOUR_PROJECT_ID or run: gcloud config set project YOUR_PROJECT_ID"
   exit 1
 fi
 

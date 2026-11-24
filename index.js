@@ -1,7 +1,16 @@
 import crypto from 'node:crypto';
 
 let LoggingClass = null;
-async function getLoggingClient() {
+let loggingClientOverride = null;
+
+export function setLoggingClientOverride(override) {
+  loggingClientOverride = override;
+}
+
+export async function getLoggingClient() {
+  if (loggingClientOverride) {
+    return loggingClientOverride;
+  }
   if (!LoggingClass) {
     const mod = await import('@google-cloud/logging');
     LoggingClass = mod.Logging || mod.default?.Logging || mod.default;
@@ -54,65 +63,162 @@ export const SAFE_AUDIT_HEADERS = Object.freeze([
   'sec-fetch-user'
 ]);
 
+const SAFE_HEADERS_SET = new Set(SAFE_AUDIT_HEADERS);
+
 /**
  * Extracts ONLY safe, allowlisted headers from an incoming headers structure.
+ * Checks header keys case-insensitively and standardizes on lowercase keys.
  * Guaranteed to never capture authorization tokens, cookies, or credentials.
  *
- * @param {Object|Headers|Map} headers - Headers object or Map
+ * Supports:
+ * - Plain JavaScript object: { 'User-Agent': '...', 'Authorization': '...' }
+ * - Fetch Headers / Map object (via .get() or .entries())
+ * - Array of header strings: ['User-Agent: FooBot', 'Authorization: Bearer secret']
+ *
+ * @param {Object|Headers|Map|Array<string>} headers - Headers structure
  * @returns {Record<string, string>} Sanitized allowlisted headers
  */
 export function filterSafeHeaders(headers) {
   if (!headers) return {};
   const filtered = {};
 
-  if (typeof headers.get === 'function') {
-    for (const name of SAFE_AUDIT_HEADERS) {
-      const val = headers.get(name);
-      if (val) filtered[name] = val;
+  // Case 1: Array of header lines e.g. ["User-Agent: bot", "Cookie: sid=123"]
+  if (Array.isArray(headers)) {
+    for (const item of headers) {
+      if (typeof item === 'string') {
+        const colonIndex = item.indexOf(':');
+        if (colonIndex > 0) {
+          const key = item.slice(0, colonIndex).trim().toLowerCase();
+          const val = item.slice(colonIndex + 1).trim();
+          if (SAFE_HEADERS_SET.has(key) && val) {
+            filtered[key] = val;
+          }
+        }
+      }
     }
     return filtered;
   }
 
-  for (const name of SAFE_AUDIT_HEADERS) {
-    const val = headers[name];
-    if (val !== undefined && val !== null && val !== '') {
-      filtered[name] = Array.isArray(val) ? val.join(', ') : String(val);
+  // Case 2: Fetch Headers or Map instance with entries() or get()
+  if (typeof headers.entries === 'function') {
+    for (const [rawKey, rawVal] of headers.entries()) {
+      const key = String(rawKey).toLowerCase();
+      if (SAFE_HEADERS_SET.has(key) && rawVal) {
+        filtered[key] = String(rawVal);
+      }
+    }
+    return filtered;
+  }
+
+  // Case 3: Standard Object
+  for (const [rawKey, rawVal] of Object.entries(headers)) {
+    const key = String(rawKey).toLowerCase();
+    if (SAFE_HEADERS_SET.has(key) && rawVal !== undefined && rawVal !== null && rawVal !== '') {
+      filtered[key] = Array.isArray(rawVal) ? rawVal.join(', ') : String(rawVal);
     }
   }
+
   return filtered;
 }
 
 /**
- * Converts Google Cloud Logging latency string (e.g. "0.045120s") to integer milliseconds.
+ * Cleans IP addresses reported by Google Cloud Load Balancer.
+ * Strips port numbers if present (e.g. "198.51.100.25:48210" -> "198.51.100.25"
+ * or "[2001:db8::1]:8080" -> "2001:db8::1").
  *
- * @param {string|number} latency
+ * @param {string} rawIp
+ * @returns {string} Clean IPv4 or IPv6 address
+ */
+export function cleanIp(rawIp) {
+  if (!rawIp || typeof rawIp !== 'string') return '127.0.0.1';
+  let ip = rawIp.trim();
+
+  // IPv6 bracketed format with port: [2001:db8::1]:8080
+  if (ip.startsWith('[')) {
+    const closingBracket = ip.indexOf(']');
+    if (closingBracket !== -1) {
+      return ip.slice(1, closingBracket);
+    }
+  }
+
+  // IPv4 with port: 198.51.100.25:48210 (contains single colon)
+  const parts = ip.split(':');
+  if (parts.length === 2 && !ip.includes('::')) {
+    return parts[0];
+  }
+
+  return ip;
+}
+
+/**
+ * Converts Google Cloud Logging latency representations to integer milliseconds.
+ *
+ * Supported formats:
+ * - Second string with 's' suffix: "0.045120s" -> 45
+ * - Numeric seconds: 0.045 -> 45, 1.5 -> 1500
+ * - Protobuf Duration object: { seconds: 1, nanos: 250000000 } -> 1250
+ * - Number string without 's': "1.25" -> 1250
+ *
+ * @param {string|number|Object} latency
  * @returns {number} Latency in milliseconds
  */
 export function parseLatencyMs(latency) {
+  if (!latency) return 0;
+
+  // Protobuf Duration representation: { seconds, nanos }
+  if (typeof latency === 'object' && latency !== null) {
+    const seconds = Number(latency.seconds || 0);
+    const nanos = Number(latency.nanos || 0);
+    return Math.max(0, Math.round(seconds * 1000 + nanos / 1e6));
+  }
+
   if (typeof latency === 'number') {
-    return Math.round(latency * 1000);
+    return Number.isFinite(latency) ? Math.max(0, Math.round(latency * 1000)) : 0;
   }
+
   if (typeof latency === 'string') {
-    const parsed = parseFloat(latency.replace('s', ''));
-    return Number.isFinite(parsed) ? Math.round(parsed * 1000) : 0;
+    const cleanStr = latency.trim();
+    if (!cleanStr) return 0;
+    const parsed = parseFloat(cleanStr.replace(/s$/i, ''));
+    return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed * 1000)) : 0;
   }
+
   return 0;
 }
 
 /**
  * Transforms a single Cloud Logging LogEntry into a Voight Trace Event Contract observation.
+ * Accurately extracts fields from both @google-cloud/logging SDK entries and raw JSON logs.
  *
  * @param {Object} entry - Google Cloud LogEntry
  * @param {Object} config - { siteId, tenantId, collectorId }
  * @returns {Object|null} Transformed observation or null if invalid
  */
 export function transformLogEntry(entry, config) {
-  if (!entry || !entry.metadata) return null;
+  if (!entry) return null;
 
-  const metadata = entry.metadata;
-  const http = metadata.httpRequest || {};
+  // SDK may expose fields directly on entry or under entry.metadata
+  const metadata = entry.metadata || entry;
+  const http = metadata.httpRequest || entry.httpRequest || {};
+  const jsonPayload = metadata.jsonPayload || entry.data || entry.jsonPayload || {};
+  const resource = metadata.resource || entry.resource || {};
+  const labels = resource.labels || {};
+
   const requestUrlStr = http.requestUrl || '/';
+  const rawHeaders = {};
 
+  // Extract custom headers from jsonPayload if configured on customer GLB
+  const payloadHeaders = jsonPayload.httpRequest?.headers || jsonPayload.customHeaders || jsonPayload.headers || {};
+  if (Array.isArray(payloadHeaders)) {
+    Object.assign(rawHeaders, filterSafeHeaders(payloadHeaders));
+  } else if (typeof payloadHeaders === 'object') {
+    Object.assign(rawHeaders, payloadHeaders);
+  }
+
+  if (http.userAgent) rawHeaders['user-agent'] = http.userAgent;
+  if (http.referer) rawHeaders['referer'] = http.referer;
+
+  // Parse URL safely
   let parsedUrl;
   try {
     parsedUrl = new URL(requestUrlStr, 'https://unknown-host');
@@ -120,16 +226,35 @@ export function transformLogEntry(entry, config) {
     parsedUrl = { protocol: 'https:', hostname: 'unknown-host', pathname: '/', searchParams: new URLSearchParams() };
   }
 
-  const insertId = metadata.insertId || crypto.randomUUID();
-  const occurredAt = metadata.timestamp ? new Date(metadata.timestamp).toISOString() : new Date().toISOString();
-
-  // Extract custom headers if logged in jsonPayload
-  const rawHeaders = metadata.jsonPayload?.customHeaders || {};
-  if (http.userAgent) rawHeaders['user-agent'] = http.userAgent;
-  if (http.referer) rawHeaders['referer'] = http.referer;
-  if (parsedUrl.hostname) rawHeaders['host'] = parsedUrl.hostname;
+  if (parsedUrl.hostname && parsedUrl.hostname !== 'unknown-host') {
+    rawHeaders['host'] = parsedUrl.hostname;
+  } else if (rawHeaders['host']) {
+    // If requestUrl was relative and host header was captured
+    try {
+      parsedUrl = new URL(requestUrlStr, `https://${rawHeaders['host']}`);
+    } catch {
+      // fallback
+    }
+  }
 
   const selectedHeaders = filterSafeHeaders(rawHeaders);
+  const insertId = metadata.insertId || entry.insertId || crypto.randomUUID();
+  const rawTimestamp = metadata.timestamp || entry.timestamp;
+  const occurredAt = rawTimestamp ? new Date(rawTimestamp).toISOString() : new Date().toISOString();
+
+  // Extract client IP and sanitize port
+  const clientIp = cleanIp(http.remoteIp);
+
+  // Geographic country code resolution:
+  // 1. Prioritize Cloud Armor clientRegion if present (e.g., "US", "BR")
+  // 2. Fallback to resource zone or default "XX"
+  let countryCode = 'XX';
+  const armorRegion = jsonPayload.securityPolicyRequestData?.clientRegion;
+  if (armorRegion && typeof armorRegion === 'string' && armorRegion.length === 2) {
+    countryCode = armorRegion.toUpperCase();
+  } else if (labels.zone && typeof labels.zone === 'string' && labels.zone !== 'global') {
+    countryCode = labels.zone.slice(0, 2).toUpperCase();
+  }
 
   return {
     event_id: crypto.randomUUID(),
@@ -148,13 +273,13 @@ export function transformLogEntry(entry, config) {
       host: parsedUrl.hostname || 'unknown-host',
       path: parsedUrl.pathname || '/',
       query_params: Object.fromEntries(parsedUrl.searchParams ? parsedUrl.searchParams.entries() : []),
-      referer: http.referer || '',
-      user_agent: http.userAgent || '',
+      referer: http.referer || selectedHeaders['referer'] || '',
+      user_agent: http.userAgent || selectedHeaders['user-agent'] || '',
       selected_headers: selectedHeaders
     },
     network: {
-      ip_hash: http.remoteIp || '127.0.0.1',
-      country: (metadata.resource?.labels?.zone || 'XX').slice(0, 2).toUpperCase(),
+      ip_hash: clientIp,
+      country: countryCode,
       asn: 0
     },
     response: {
@@ -167,7 +292,7 @@ export function transformLogEntry(entry, config) {
 
 /**
  * Cloud Run Function HTTP Entry Point: collectLogs
- * Invoked periodically by Cloud Scheduler or manual trigger.
+ * Invoked periodically by Cloud Scheduler (cron: * /1 * * * *) or manual trigger.
  *
  * @param {import('express').Request} req
  * @param {import('express').Response} res
@@ -175,8 +300,8 @@ export function transformLogEntry(entry, config) {
 export async function collectLogs(req, res) {
   const startTime = Date.now();
 
-  // Healthcheck support
-  if (req.method === 'GET' && (req.path === '/health' || req.path === '/healthz')) {
+  // Healthcheck endpoints
+  if (req.method === 'GET' && (req.path === '/health' || req.path === '/healthz' || req.path === '/')) {
     return res.status(200).json({ status: 'healthy', collector: 'gcp-collector', version: '1.0.0' });
   }
 
@@ -189,7 +314,7 @@ export async function collectLogs(req, res) {
 
   if (!apiKey || !siteId) {
     const errorMsg = 'VOIGHT_TRACE_API_KEY or VOIGHT_TRACE_SITE_ID is missing in environment variables.';
-    console.error(`[Voight Trace GCP Collector] Error: ${errorMsg}`);
+    console.error(`[Voight Trace GCP Collector] Configuration Error: ${errorMsg}`);
     return res.status(500).json({ error: 'ConfigurationError', message: errorMsg });
   }
 
