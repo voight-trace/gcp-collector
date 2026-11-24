@@ -18,6 +18,62 @@ It executes inside your Google Cloud project (**BYOC — Bring Your Own Cloud**)
 
 ---
 
+## 🏗️ Architecture & Provisioned GCP Resources
+
+The collector operates with a strictly isolated, stateless **Bring Your Own Cloud (BYOC)** topology. Everything runs inside your own Google Cloud project perimeter:
+
+```mermaid
+flowchart TD
+    classDef gcp fill:#e8f0fe,stroke:#4285f4,stroke-width:2px,color:#1a73e8;
+    classDef voight fill:#e6f4ea,stroke:#34a853,stroke-width:2px,color:#137333;
+    classDef traffic fill:#fef7e0,stroke:#f9ab00,stroke-width:2px,color:#b06000;
+
+    subgraph ClientGCP ["Customer Google Cloud Environment (BYOC — 100% Isolated)"]
+        User["🌐 Visitor / AI Bot / Search Crawler"]:::traffic
+        GLB["🔀 Global External Application Load Balancer (GLB)<br/><i>(Existing Customer Frontend)</i>"]:::gcp
+        Backend["🖥️ Customer Backend Services<br/><i>(GKE, Cloud Run, GCE, GCS)</i>"]:::gcp
+        CloudLogging["📑 Google Cloud Logging<br/><code>resource.type='http_load_balancer'</code>"]:::gcp
+        
+        Scheduler["⏰ Cloud Scheduler<br/><code>voight-trace-schedule</code><br/><i>(Cron: */1 * * * *)</i>"]:::gcp
+        ServiceAccount["🔑 Service Account<br/><code>voight-collector@...</code><br/><i>(Least Privilege IAM)</i>"]:::gcp
+        CloudRunFunc["⚡ Cloud Run Function (2nd Gen)<br/><code>voight-trace-collector</code><br/><i>(Node.js 20, 256MB RAM)</i>"]:::gcp
+        Sanitizer["🛡️ In-Memory Sanitizer<br/><i>(Drops Auth, Cookies, Tokens)</i>"]:::gcp
+
+        User -->|"1. HTTPS Request"| GLB
+        GLB -->|"2. Upstream Proxy (0ms added latency)"| Backend
+        GLB -.->|"3. Asynchronous Access Log Stream"| CloudLogging
+        
+        Scheduler -->|"4. Authenticated OIDC Trigger (every 60s)"| CloudRunFunc
+        ServiceAccount -.->|"IAM: roles/logging.viewer"| CloudRunFunc
+        CloudRunFunc <-->|"5. Query 75s sliding window"| CloudLogging
+        CloudRunFunc -->|"6. Sanitize Headers locally"| Sanitizer
+    end
+
+    subgraph VoightPlatform ["Voight Trace Ingestion Platform"]
+        IngestionAPI["🚀 Voight Trace Ingestion API<br/><code>https://api.voighttrace.com/api/v1/ingestion/events</code>"]:::voight
+        AnalyticsEngine["🧠 AI Agent Classification & Real-Time Analytics Engine"]:::voight
+        
+        Sanitizer -->|"7. HTTPS Batch POST (Gzip / TLS 1.3)"| IngestionAPI
+        IngestionAPI --> AnalyticsEngine
+    end
+```
+
+### Exact Inventory of Provisioned GCP Resources
+
+When running `deploy.sh`, only the following minimal, least-privilege resources are provisioned in your Google Cloud project:
+
+| Resource Name | GCP Service | Type / Specifications | IAM Role / Scope | Estimated Cost |
+| :--- | :--- | :--- | :--- | :--- |
+| **`voight-collector`** | **Cloud IAM** | Dedicated Service Account | `roles/logging.viewer` + Cloud Run Invoker | **$0.00** |
+| **`voight-trace-collector`** | **Cloud Run Functions (2nd Gen)** | Node.js 20, 256 MB RAM, 0.166 vCPU, us-central1 | Private (`--no-allow-unauthenticated`), ADC Auth | **$0.00** (Free Tier) |
+| **`voight-trace-schedule`** | **Cloud Scheduler** | Managed HTTP Cron (`*/1 * * * *`) | OIDC Token authenticated via `voight-collector` | **$0.00** (1 of 3 free jobs) |
+| **Log Ingestion Reader** | **Cloud Logging** | Monitored query on `http_load_balancer` | Read-only API queries (`logging.getEntries`) | **$0.00** (First 50 GB free) |
+
+> [!NOTE]
+> **Zero External Project Access:** Voight Trace never requests access to your Google Cloud project, and no service account keys are ever exported or shared outside your GCP perimeter. All data filtering occurs in-memory inside your Cloud Run Function before leaving your project.
+
+---
+
 ## 💰 Google Cloud Free Tier Breakdown (100% Free)
 
 Google Cloud provides an **Always Free** tier that completely covers the monthly operating costs of the Voight Trace GCP Collector:
