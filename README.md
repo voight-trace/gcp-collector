@@ -30,14 +30,14 @@ flowchart TD
 
     subgraph ClientGCP ["Customer Google Cloud Environment (BYOC — 100% Isolated)"]
         User["🌐 Visitor / AI Bot / Search Crawler"]:::traffic
-        GLB["🔀 Global External Application Load Balancer (GLB)<br/><i>(Existing Customer Frontend)</i>"]:::gcp
-        Backend["🖥️ Customer Backend Services<br/><i>(GKE, Cloud Run, GCE, GCS)</i>"]:::gcp
-        CloudLogging["📑 Google Cloud Logging<br/><code>resource.type='http_load_balancer'</code>"]:::gcp
+        GLB["🔀 Global External Application Load Balancer (GLB)<br/>(Existing Customer Frontend)"]:::gcp
+        Backend["🖥️ Customer Backend Services<br/>(GKE, Cloud Run, GCE, GCS)"]:::gcp
+        CloudLogging["📑 Google Cloud Logging<br/>resource.type='http_load_balancer'"]:::gcp
         
-        Scheduler["⏰ Cloud Scheduler<br/><code>voight-trace-schedule</code><br/><i>(Cron: */1 * * * *)</i>"]:::gcp
-        ServiceAccount["🔑 Service Account<br/><code>voight-collector@...</code><br/><i>(Least Privilege IAM)</i>"]:::gcp
-        CloudRunFunc["⚡ Cloud Run Function (2nd Gen)<br/><code>voight-trace-collector</code><br/><i>(Node.js 20, 256MB RAM)</i>"]:::gcp
-        Sanitizer["🛡️ In-Memory Sanitizer<br/><i>(Drops Auth, Cookies, Tokens)</i>"]:::gcp
+        Scheduler["⏰ Cloud Scheduler<br/>voight-trace-schedule<br/>Cron: */1 * * * *"]:::gcp
+        ServiceAccount["🔑 Service Account<br/>voight-collector@...<br/>(Least Privilege IAM)"]:::gcp
+        CloudRunFunc["⚡ Cloud Run Function (2nd Gen)<br/>voight-trace-collector<br/>(Node.js 20, 256MB RAM)"]:::gcp
+        Sanitizer["🛡️ In-Memory Sanitizer<br/>(Drops Auth, Cookies, Tokens)"]:::gcp
 
         User -->|"1. HTTPS Request"| GLB
         GLB -->|"2. Upstream Proxy (0ms added latency)"| Backend
@@ -50,7 +50,7 @@ flowchart TD
     end
 
     subgraph VoightPlatform ["Voight Trace Ingestion Platform"]
-        IngestionAPI["🚀 Voight Trace Ingestion API<br/><code>https://api.voighttrace.com/api/v1/ingestion/events</code>"]:::voight
+        IngestionAPI["🚀 Voight Trace Ingestion API<br/>https://api.voighttrace.com/api/v1/ingestion/events"]:::voight
         AnalyticsEngine["🧠 AI Agent Classification & Real-Time Analytics Engine"]:::voight
         
         Sanitizer -->|"7. HTTPS Batch POST (Gzip / TLS 1.3)"| IngestionAPI
