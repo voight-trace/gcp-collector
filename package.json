@@ -1,0 +1,30 @@
+{
+  "name": "@voight-trace/gcp-collector",
+  "version": "1.0.0",
+  "description": "Official GCP Collector for Voight Trace — Cloud Run Function telemetry collector for Google Cloud Load Balancer (GLB) access logs",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "functions-framework --target=collectLogs --port=8080",
+    "test": "node test.js"
+  },
+  "keywords": [
+    "voight-trace",
+    "gcp",
+    "google-cloud",
+    "load-balancer",
+    "cloud-run-functions",
+    "cloud-logging",
+    "ai-agents",
+    "observability"
+  ],
+  "author": "Voight Trace Core Team",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@google-cloud/functions-framework": "^3.4.5",
+    "@google-cloud/logging": "^11.2.0"
+  }
+}
