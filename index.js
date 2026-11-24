@@ -309,7 +309,7 @@ export async function collectLogs(req, res) {
   const siteId = process.env.VOIGHT_TRACE_SITE_ID;
   const tenantId = process.env.VOIGHT_TRACE_TENANT_ID || siteId;
   const collectorId = process.env.VOIGHT_TRACE_COLLECTOR_ID || `gcp_${process.env.K_SERVICE || 'glb'}`;
-  const ingestUrl = process.env.VOIGHT_TRACE_INGEST_URL || 'https://api.voighttrace.com/api/v1/ingestion/events';
+  const ingestUrl = process.env.VOIGHT_TRACE_INGEST_URL || 'https://voighttrace.vercel.app/api/v1/ingestion/events';
   const lookbackSeconds = Number(process.env.LOOKBACK_SECONDS || 75);
 
   if (!apiKey || !siteId) {

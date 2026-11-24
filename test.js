@@ -440,7 +440,7 @@ describe('Voight Trace GCP Collector — Comprehensive Unit Tests', () => {
     beforeEach(() => {
       process.env.VOIGHT_TRACE_API_KEY = 'vt_live_test_key_12345';
       process.env.VOIGHT_TRACE_SITE_ID = 'site_test_glb_001';
-      process.env.VOIGHT_TRACE_INGEST_URL = 'https://api.voighttrace.com/api/v1/ingestion/events';
+      process.env.VOIGHT_TRACE_INGEST_URL = 'https://voighttrace.vercel.app/api/v1/ingestion/events';
     });
 
     afterEach(() => {
@@ -607,7 +607,7 @@ describe('Voight Trace GCP Collector — Comprehensive Unit Tests', () => {
       assert.equal(responseBody.dispatched, 2);
 
       // Verify Ingestion API call contract
-      assert.equal(capturedUrl, 'https://api.voighttrace.com/api/v1/ingestion/events');
+      assert.equal(capturedUrl, 'https://voighttrace.vercel.app/api/v1/ingestion/events');
       assert.equal(capturedHeaders['Authorization'], 'Bearer vt_live_test_key_12345');
       assert.equal(capturedHeaders['Content-Type'], 'application/json');
       assert.equal(capturedHeaders['x-voight-collector-type'], 'gcp_collector');

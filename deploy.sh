@@ -12,7 +12,7 @@ PROJECT_ID="${PROJECT_ID:-}"
 API_KEY="${VOIGHT_TRACE_API_KEY:-}"
 SITE_ID="${VOIGHT_TRACE_SITE_ID:-}"
 LOOKBACK_SECONDS="${LOOKBACK_SECONDS:-75}"
-INGEST_URL="${VOIGHT_TRACE_INGEST_URL:-https://api.voighttrace.com/api/v1/ingestion/events}"
+INGEST_URL="${VOIGHT_TRACE_INGEST_URL:-https://voighttrace.vercel.app/api/v1/ingestion/events}"
 
 # Parse command line flags
 while [[ $# -gt 0 ]]; do

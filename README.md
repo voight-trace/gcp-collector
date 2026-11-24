@@ -50,7 +50,7 @@ flowchart TD
     end
 
     subgraph VoightPlatform ["Voight Trace Ingestion Platform"]
-        IngestionAPI["🚀 Voight Trace Ingestion API<br/>https://api.voighttrace.com/api/v1/ingestion/events"]:::voight
+        IngestionAPI["🚀 Voight Trace Ingestion API<br/>https://voighttrace.vercel.app/api/v1/ingestion/events"]:::voight
         AnalyticsEngine["🧠 AI Agent Classification & Real-Time Analytics Engine"]:::voight
         
         Sanitizer -->|"7. HTTPS Batch POST (Gzip / TLS 1.3)"| IngestionAPI
